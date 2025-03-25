@@ -35,17 +35,21 @@ def debugBytesStr(line):
 def debugBytesNum(i):
     print(f'{i:08b}')
 
-def getRegisterNameMov11(register, w):
+def getRegisterName(register, w):
     reg_table_16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
     reg_table_8  = ['al', 'cl', 'dl', 'bl', 'ah', 'ch', 'dh', 'bh']
     regs = reg_table_8 if w == 0 else reg_table_16
     return regs[register]
 
-def getRegisterNameMov00(register, displacement = None):
+def getRegisterNameMemory(register, displacement = None):
+    if displacement is None: 
+        displacement = 0
     reg_table = ['bx + si', 'bx + di', 'bp + si', 'bp + di', 'si', 'di', 'bp', 'bx']
     reg = reg_table[register]
-    if displacement:
+    if displacement > 0:
         reg += f" + {displacement}"
+    elif displacement < 0:
+        reg += f" - {-displacement}"
     return f"[{reg}]"
 
 class ASMParser:
@@ -56,17 +60,24 @@ class ASMParser:
     def parse(self):
         ret = []
         while self.pc < len(self.asm_bytes):
-            ret += self.parseInstruction()
+            line = self.parseInstruction()
+            ret += line
+            # print(line)
         return [line + "\n" for line in ret]
     
     def parseInstruction(self):
-        # opcode is the first by
+        # opcode is the first byte sort of
         if self.asm_bytes[self.pc] >> 2 == 0b100010:
             return self.parseMOV()
+        elif self.asm_bytes[self.pc] >> 1 == 0b1100011:
+            return self.parseMOV()
+        elif self.asm_bytes[self.pc] >> 2 == 0b101000:
+            return self.parseMOV()
         elif self.asm_bytes[self.pc] >> 4 == 0b1011:
+            print ("MOV Direct")
             return self.parseMOVDirect()
         else:
-            raise ValueError("Invalid opcode %s" % self.asm_bytes[self.pc])
+            raise ValueError("Invalid opcode %s which is %s in hex and %s in binary at position %d" % (self.asm_bytes[self.pc], hex(self.asm_bytes[self.pc]), bin(self.asm_bytes[self.pc]), self.pc))
 
     def pullBytes(self, num_bytes, signed = False):
         ret = 0
@@ -76,11 +87,21 @@ class ASMParser:
         return ret
     
     def getIntegerFromBytes(self, num_bytes, signed = True):
+        if num_bytes == 0:
+            return 0
         ret = self.pullBytes(num_bytes)
         if signed:
             sign_bit = 1 << (num_bytes * 8 - 1)
             ret = (ret ^ sign_bit) - sign_bit
         return ret
+
+    def parseModRM(self):
+        modrm = self.pullBytes(1)
+        mod = modrm >> 6
+        reg = (modrm >> 3) & 0x7
+        rm = modrm & 0x7
+        return mod, reg, rm
+    
 
     def parseMOV(self):
         # the first 6 bytes are the opcode
@@ -91,25 +112,39 @@ class ASMParser:
         instruction = self.pullBytes(1)
         d = (instruction >> 1) & 0x1
         w = instruction & 0x1
-        modrm = self.pullBytes(1)
-        mod = modrm >> 6
-        reg = (modrm >> 3) & 0x7
-        rm = modrm & 0x7
+        bytes = 2 if w else 1
+        # if instruction starts with 0xA0 in the first six bits, then the instruction is MOV but we just pull direct memory address
+        if instruction & 0b11111100 == 0xA0:
+            dest = "ax" if w else "al"
+            src = "[" + str(self.getIntegerFromBytes(bytes, signed = False)) + "]"
+            # Print bytes of src
+            if d: 
+                src, dest = dest, src
+            return ["mov %s, %s" % (dest, src)]
+
+        mod, reg, rm = self.parseModRM()
         if mod == 0b11:
-            src, dest = getRegisterNameMov11(rm, w), getRegisterNameMov11(reg, w)
+            src, dest = getRegisterName(rm, w), " " + getRegisterName(reg, w)
         else: 
-            if mod == 0b01:
-                displacement = self.pullBytes(1)
-            elif mod == 0b10:
-                displacement = self.pullBytes(2)
+            displacement = self.getIntegerFromBytes(mod, signed = True)
 
             if mod == 0b00 and rm == 0b110:
                 # pull two bytes from the instruction
                 direct_memory_address = self.getIntegerFromBytes(2)
                 src = [direct_memory_address]
             else:
-                src = getRegisterNameMov00(rm, displacement)
-            dest = getRegisterNameMov11(reg, w)
+                src = getRegisterNameMemory(rm, displacement)
+            dest = getRegisterName(reg, w)
+        
+        # If the instruction is 0xc6, then the instruction is a MOV but with fixed inputs
+        if instruction & 0xc6 == 0xc6:
+            text = "word " if w else "byte "
+            direct_memory_address = self.getIntegerFromBytes(bytes)
+            # unset d bit
+            d = 0
+            dest = text + str(direct_memory_address)
+
+        # Flip order if d is set
         if d == 0b1:
             src, dest = dest, src
         return ["mov %s, %s" % (src, dest)]
@@ -124,13 +159,13 @@ class ASMParser:
         else:
             immediate = self.getIntegerFromBytes(1)
         
-        return ["mov %s, %s" % (getRegisterNameMov11(reg, w), immediate)]     
+        return ["mov %s, %s" % (getRegisterName(reg, w), immediate)]
+
        
 def decode8086(asm_bytes) -> list[str]:
     # The first step is to parse the six bits of the opcode
     # if the first six bits of the opcode are 100010, then the opcode is MOV
     # if the first six bits of the opcode are 100010:
-
     parser = ASMParser(asm_bytes)
     return parser.parse()
     
@@ -164,7 +199,10 @@ def main():
 
     with open(args.output, 'w') as f:
         f.write("bits %d\n" % args.bits)
-        f.writelines(decode8086(inputs));
+        lines = decode8086(inputs)
+        for line in lines:
+            # print(line)
+            f.write(line)
         
     # Call nasm to assemble the output
     test_file = args.output.replace(".bin", ".o")
