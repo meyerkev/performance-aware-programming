@@ -29,6 +29,7 @@
 import argparse
 import subprocess
 
+from functools import wraps
 from typing import List, Optional, Tuple
 
 def debugBytesStr(line):
@@ -37,30 +38,6 @@ def debugBytesStr(line):
 
 def debugBytesNum(i):
     print(f'{i:08b}')
-
-def getRegisterName(register : int, word: bool):
-    reg_table_16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
-    reg_table_8  = ['al', 'cl', 'dl', 'bl', 'ah', 'ch', 'dh', 'bh']
-    registers = reg_table_16 if word else reg_table_8
-    return registers[register]
-
-def getRegisterNameMemory(register : int, displacement : Optional[int] = None, force_zero : bool = False) -> str:
-    if displacement is None: 
-        displacement = 0
-    reg_table = ['bx + si', 'bx + di', 'bp + si', 'bp + di', 'si', 'di', 'bp', 'bx']
-    reg = reg_table[register]
-    if displacement != 0 or force_zero:
-        if displacement > 0:
-            reg += f" + {displacement}"
-        elif displacement < 0:
-            reg += f" - {-displacement}"
-        elif "+" in reg:
-            pass
-        else:
-            reg += " + 0"
-
-    return "[" + reg + "]"
-    
 
 OP83_TABLE = {
     0: "add",
@@ -135,16 +112,38 @@ class ASMParser:
     def __init__(self, asm_bytes : List[bytes]):
         self.asm_bytes = asm_bytes
         self.pc = 0
+
+    @classmethod
+    def getRegisterName(cls, register : int, word: bool):
+        reg_table_16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
+        reg_table_8  = ['al', 'cl', 'dl', 'bl', 'ah', 'ch', 'dh', 'bh']
+        registers = reg_table_16 if word else reg_table_8
+        return registers[register]
+
+    @classmethod
+    def getRegisterNameMemory(cls, register : int, displacement : Optional[int] = None, force_zero : bool = False) -> str:
+        if displacement is None: 
+            displacement = 0
+        reg_table = ['bx + si', 'bx + di', 'bp + si', 'bp + di', 'si', 'di', 'bp', 'bx']
+        reg = reg_table[register]
+        if displacement != 0 or force_zero:
+            if displacement > 0:
+                reg += f" + {displacement}"
+            elif displacement < 0:
+                reg += f" - {-displacement}"
+            elif "+" in reg:
+                pass
+            else:
+                reg += " + 0"
+
+        return "[" + reg + "]"
     
     def parse(self):
-        max_count = 100
         while self.pc < len(self.asm_bytes):
             line = self.parseInstruction()
             yield line + "\n"
             print(line)
-            max_count -= 1
-            if max_count == 0:
-                break
+
     def parseInstruction(self) -> str:
         # opcode is the first byte sort of
         if self.asm_bytes[self.pc] >> 2 == 0b100010 or self.asm_bytes[self.pc] >> 1 == 0b1100011:
@@ -156,9 +155,10 @@ class ASMParser:
         elif self.asm_bytes[self.pc] in MATH_REG_OPCODES or self.asm_bytes[self.pc] in MATH_IMM_RM_OPCODES or self.asm_bytes[self.pc] in MATH_ACC_OPCODES:
             return self.parseMath()
         elif self.asm_bytes[self.pc] == 0x90:
+            self.pc += 1
             return "nop"
         elif self.asm_bytes[self.pc] in COND_JUMP_OPCODES:
-            
+            return self.parseJump()
         else:
             print("Invalid opcode %s which is %s in hex and %s in binary at position %d" % 
                              (self.asm_bytes[self.pc], 
@@ -166,10 +166,6 @@ class ASMParser:
                               bin(self.asm_bytes[self.pc]), 
                               self.pc))
             return ""
-        
-    def parseJump(self) -> str:
-        instruction = self.getBytes(1)
-        return "%s %s" % (COND_JUMP_OPCODES[instruction], self.getIntegerFromBytes(1, signed=True))
         
     def getBytes(self, num_bytes : int) -> int:
         ret = 0
@@ -199,13 +195,13 @@ class ASMParser:
                           src_lambda : Optional[callable] = None, 
                           force_zero: bool = False):
         if src_lambda is None: 
-            src_lambda = lambda: getRegisterName(reg, word) 
+            src_lambda = lambda: self.getRegisterName(reg, word) 
         if modifier is None:
             modifier = ""
         elif not modifier.endswith(" "):
             modifier += " "
         if mod == 0b11:
-            src, dest = src_lambda(), getRegisterName(rm, word)
+            src, dest = src_lambda(), self.getRegisterName(rm, word)
         else: 
             displacement = self.getIntegerFromBytes(mod, signed = True)
             if displacement == 797 or displacement == 70: 
@@ -215,23 +211,41 @@ class ASMParser:
                 direct_memory_value = self.getIntegerFromBytes(2)
                 dest = [direct_memory_value]
             else:
-                dest = modifier + getRegisterNameMemory(rm, displacement, force_zero=force_zero)
+                dest = modifier + self.getRegisterNameMemory(rm, displacement, force_zero=force_zero)
             src = lam()
         return src, dest
     
-    def parseMath(self) -> str:
-        instruction = self.getBytes(1)
-        print("Instruction: ", instruction, "is", hex(instruction), "in hex")
+    def parser(fn):
+        @wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            instruction = self.getBytes(1)
+            print("Instruction: ", instruction, "is", hex(instruction), "in hex")
+            # call the real function — should return (mnemonic, src, dest)
+            mnemonic, src, dest, d = fn(self, instruction)
+            if d:
+                src, dest = dest, src
+
+            if dest:
+                return f"{mnemonic} {dest}, {src}"
+            return f"{mnemonic} {src}"
+        return wrapper
+    
+    @parser
+    def parseJump(self, instruction : int) -> str:
+        return COND_JUMP_OPCODES[instruction], self.getIntegerFromBytes(1, signed=True), None, None
+
+    @parser
+    def parseMath(self, instruction : int) -> Tuple[str, str, str, bool]:
         if instruction in MATH_ACC_OPCODES:
             mnemonic, reg = MATH_ACC_OPCODES[instruction]
             imm = self.getIntegerFromBytes(2 if reg == "ax" else 1)
-            return "%s %s, %s" % (mnemonic, reg, imm)
-        
+            return (mnemonic, imm, reg, False)
+
         d = False
         mod, reg, rm = self.getModRM()
         if instruction in MATH_REG_OPCODES:
             mnemonic, word, d = MATH_REG_OPCODES[instruction]
-            src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: getRegisterName(reg, word), force_zero = True)
+            src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: self.getRegisterName(reg, word), force_zero = True)
         elif instruction == 0x83:
             modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
             mnemonic = OP83_TABLE.get(reg, f"OP{reg}")
@@ -241,15 +255,13 @@ class ASMParser:
             num_bytes = MATH_IMM_RM_OPCODES[instruction]["bytes"]
             modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
             print(modifier)
-            dest = modifier + " " + getRegisterNameMemory(rm)
+            dest = modifier + " " + self.getRegisterNameMemory(rm)
             imm = self.getIntegerFromBytes(num_bytes, signed = True)    
             src = imm
-        if d: 
-            src, dest = dest, src
-        return "%s %s, %s" % (mnemonic, dest, src)
+        return mnemonic, src, dest, d
 
-    def parseMOVValue(self) -> str:
-        mnemonic = "mov"
+    @parser
+    def parseMOVValue(self, instruction : int) -> Tuple[str, str, str, bool]:
         instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
         w = instruction & 0x1
@@ -259,14 +271,12 @@ class ASMParser:
             dest = "ax" if w else "al"
             src = "[" + str(self.getIntegerFromBytes(num_bytes)) + "]"
             # Print bytes of src
-            if d: 
-                src, dest = dest, src
-            return "%s %s, %s" % (mnemonic, dest, src)
+        return "mov", src, dest, d
+    
 
-    def parseMOV(self) -> str:
+    def parseMOV(self, instruction : int) -> str:
         # the first 6 bytes are the opcode
         # the next bit is the d bit
-        mnemonic = "mov"
         # the next bit is the w bit
         instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
@@ -274,7 +284,7 @@ class ASMParser:
         num_bytes = 2 if word else 1
         
         mod, reg, rm = self.getModRM()
-        src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: getRegisterName(reg, word))
+        src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: self.getRegisterName(reg, word))
         
         # If the instruction is 0xc6, then the instruction is a MOV but with fixed inputs
         if instruction & 0xF6 == 0xc6:
@@ -284,19 +294,16 @@ class ASMParser:
             # unset d bit
             src = modifier + str(direct_memory_address)
 
-        # Flip order if d is set
-        if d == 0b1:
-            src, dest = dest, src
-        return "%s %s, %s" % (mnemonic, dest, src)
+        return "mov", dest, src, d
     
-    def parseMOVDirect(self) -> str:
+    def parseMOVDirect(self) -> Tuple[str, str, str, bool]:
         # the first 4 bytes are the opcode
         mnenomic = "mov"
         instruction = self.getBytes(1)
         word = (instruction >> 3) & 0x1
         reg = instruction & 0x7
         immediate = self.getIntegerFromBytes(word + 1)
-        return "%s %s, %s" % (mnenomic, getRegisterName(reg, word), immediate)
+        return mnenomic, self.getRegisterName(reg, word), immediate, False
 
 def decode8086(asm_bytes) -> list[str]:
     # The first step is to parse the six bits of the opcode
