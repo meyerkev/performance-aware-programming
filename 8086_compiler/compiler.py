@@ -28,20 +28,6 @@
 # CS:, DS:, SS:, ES: 
 import subprocess
 
-class Store:
-    def update(self, bits):
-        self.chunk_size = bits // 8
-
-    @property
-    def chunk_size(self):
-        return self._chunk_size
-    
-    @chunk_size.setter
-    def chunk_size(self, value):
-        self._chunk_size = value
-
-STORE = Store()
-
 def debugBytesStr(line):
     bitstr = ''.join(f'{byte:08b}' for byte in line)
     print(bitstr)
@@ -49,51 +35,104 @@ def debugBytesStr(line):
 def debugBytesNum(i):
     print(f'{i:08b}')
 
-def getRegisterName(register, w):
+def getRegisterNameMov11(register, w):
     reg_table_16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
     reg_table_8  = ['al', 'cl', 'dl', 'bl', 'ah', 'ch', 'dh', 'bh']
     regs = reg_table_8 if w == 0 else reg_table_16
     return regs[register]
 
-def decodeMOV(line) -> str:
-    d = line >> 9 & 0b1
-    w = line >> 8 & 0b1
-    mod = line >> 6 & 0b11
-    reg = line >> 3 & 0b111
-    rm = line & 0b111
-    print("d: ", d)
-    print("w: ", w)
-    print("mod: ", mod)
-    print("reg: ", reg)
-    print("rm: ", rm)
+def getRegisterNameMov00(register, displacement = None):
+    reg_table = ['bx + si', 'bx + di', 'bp + si', 'bp + di', 'si', 'di', 'bp', 'bx']
+    reg = reg_table[register]
+    if displacement:
+        reg += f" + {displacement}"
+    return f"[{reg}]"
 
-    reg_name = getRegisterName(reg, w)
-    rm_name = getRegisterName(rm, w)
+class ASMParser:
+    def __init__(self, asm_bytes):
+        self.asm_bytes = asm_bytes
+        self.pc = 0
+    
+    def parse(self):
+        ret = []
+        while self.pc < len(self.asm_bytes):
+            ret += self.parseInstruction()
+        return [line + "\n" for line in ret]
+    
+    def parseInstruction(self):
+        # opcode is the first by
+        if self.asm_bytes[self.pc] >> 2 == 0b100010:
+            return self.parseMOV()
+        elif self.asm_bytes[self.pc] >> 4 == 0b1011:
+            return self.parseMOVDirect()
+        else:
+            raise ValueError("Invalid opcode %s" % self.asm_bytes[self.pc])
 
-    if d:
-        return f"MOV {reg_name}, {rm_name}"
-    else:
-        return f"MOV {rm_name}, {reg_name}"
+    def pullBytes(self, num_bytes, signed = False):
+        ret = 0
+        for i in range(num_bytes-1, -1, -1):
+            ret = (ret << 8) | self.asm_bytes[self.pc + i]
+        self.pc += num_bytes
+        return ret
+    
+    def getIntegerFromBytes(self, num_bytes, signed = True):
+        ret = self.pullBytes(num_bytes)
+        if signed:
+            sign_bit = 1 << (num_bytes * 8 - 1)
+            ret = (ret ^ sign_bit) - sign_bit
+        return ret
 
+    def parseMOV(self):
+        # the first 6 bytes are the opcode
+        # the next bit is the d bit
+        # the next bit is the w bit
 
-def decode8086(asm_bytes) -> str:
+        displacement = 0
+        instruction = self.pullBytes(1)
+        d = (instruction >> 1) & 0x1
+        w = instruction & 0x1
+        modrm = self.pullBytes(1)
+        mod = modrm >> 6
+        reg = (modrm >> 3) & 0x7
+        rm = modrm & 0x7
+        if mod == 0b11:
+            src, dest = getRegisterNameMov11(rm, w), getRegisterNameMov11(reg, w)
+        else: 
+            if mod == 0b01:
+                displacement = self.pullBytes(1)
+            elif mod == 0b10:
+                displacement = self.pullBytes(2)
+
+            if mod == 0b00 and rm == 0b110:
+                # pull two bytes from the instruction
+                direct_memory_address = self.getIntegerFromBytes(2)
+                src = [direct_memory_address]
+            else:
+                src = getRegisterNameMov00(rm, displacement)
+            dest = getRegisterNameMov11(reg, w)
+        if d == 0b1:
+            src, dest = dest, src
+        return ["mov %s, %s" % (src, dest)]
+    
+    def parseMOVDirect(self):
+        # the first 4 bytes are the opcode
+        instruction = self.pullBytes(1)
+        w = (instruction >> 3) & 0x1
+        reg = instruction & 0x7
+        if w:
+            immediate = self.getIntegerFromBytes(2)
+        else:
+            immediate = self.getIntegerFromBytes(1)
+        
+        return ["mov %s, %s" % (getRegisterNameMov11(reg, w), immediate)]     
+       
+def decode8086(asm_bytes) -> list[str]:
     # The first step is to parse the six bits of the opcode
     # if the first six bits of the opcode are 100010, then the opcode is MOV
     # if the first six bits of the opcode are 100010:
 
-    # Print the bits of line
-    debugBytesNum(asm_bytes)
-    mask = 0b111111 << 10
-    debugBytesNum(mask)
-    opcode = asm_bytes & mask
-    debugBytesNum(opcode)
-    opcode = opcode >> 10
-    debugBytesNum(opcode)
-    if opcode == 0b100010:
-        print("MOV")
-        return decodeMOV(asm_bytes)
-    
-    raise ValueError("Invalid opcode %s" % opcode)
+    parser = ASMParser(asm_bytes)
+    return parser.parse()
     
 
 def parse_args():
@@ -108,12 +147,10 @@ def parse_args():
         args.output = args.input + ".bin"
     return args
 
-def parseAssembly(filename):
+def readAssembly(filename):
     with open(filename, 'rb') as f:
         raw = f.read()
-        output = [int.from_bytes(raw[i:i+STORE.chunk_size], byteorder='big') 
-                for i in range(0, len(raw), STORE.chunk_size)]
-    return output
+        return raw
 
 def main():
     args = parse_args()
@@ -122,22 +159,17 @@ def main():
     print("Input: ", args.input)
     print("Output: ", args.output)
     print("Bits: ", args.bits)
-
-    STORE.update(args.bits)
-    inputs = parseAssembly(args.input)
-    print("Inputs: ", inputs)
-    
+    inputs = readAssembly(args.input)
     comparison=inputs
 
     with open(args.output, 'w') as f:
         f.write("bits %d\n" % args.bits)
-        for asm_line in inputs:
-            f.write(decode8086(asm_line) + "\n")
+        f.writelines(decode8086(inputs));
         
     # Call nasm to assemble the output
     test_file = args.output.replace(".bin", ".o")
-    subprocess.check_output(["nasm", "-f", "bin", "-o", test_file,  args.output]).decode("utf-8")
-    output = parseAssembly(test_file)
+    subprocess.check_output(["nasm", "-f", "bin", "-o", test_file,  args.output])
+    output = readAssembly(test_file)
 
     if output == comparison:
         print("Success")
