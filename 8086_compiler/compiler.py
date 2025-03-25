@@ -81,6 +81,7 @@ MATH_ACC_OPCODES = {
     0x2D: ('sub', 'ax'),
     0x3C: ('cmp', 'al'),
     0x3D: ('cmp', 'ax'),
+
 }
 
 MATH_REG_OPCODES = {
@@ -102,9 +103,32 @@ MATH_REG_OPCODES = {
 }
 
 MATH_IMM_RM_OPCODES = {
-    0x80: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "word": "byte", "bytes": 1},
-    0x81: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "word": "word", "bytes": 2},
-    0x83: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "word": "word", "bytes": 1},
+    0x80: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "modifier": "byte", "bytes": 1},
+    0x81: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "modifier": "word", "bytes": 2},
+    0x83: { "commands": {0: 'add', 5: 'sub', 7: 'cmp'}, "modifier": "word", "bytes": 1},
+}
+
+COND_JUMP_OPCODES = {
+    0x70: 'jo',
+    0x71: 'jno',
+    0x72: 'jb',
+    0x73: 'jnb',
+    0x74: 'je',
+    0x75: 'jne',
+    0x76: 'jbe',
+    0x77: 'ja',
+    0x78: 'js',
+    0x79: 'jns',
+    0x7A: 'jp',
+    0x7B: 'jnp',
+    0x7C: 'jl',
+    0x7D: 'jnl',
+    0x7E: 'jle',
+    0x7F: 'jg',
+    0xE0: 'loopnz',
+    0xE1: 'loopz',
+    0xE2: 'loop',
+    0xE3: 'jcxz',
 }
 
 class ASMParser:
@@ -121,31 +145,32 @@ class ASMParser:
             max_count -= 1
             if max_count == 0:
                 break
-        
-    
     def parseInstruction(self) -> str:
         # opcode is the first byte sort of
-        if self.asm_bytes[self.pc] >> 2 == 0b100010:
-            return self.parseMOV()
-        elif self.asm_bytes[self.pc] >> 1 == 0b1100011:
+        if self.asm_bytes[self.pc] >> 2 == 0b100010 or self.asm_bytes[self.pc] >> 1 == 0b1100011:
             return self.parseMOV()
         elif self.asm_bytes[self.pc] >> 2 == 0b101000:
             return self.parseMOVValue()
         elif self.asm_bytes[self.pc] >> 4 == 0b1011:
             return self.parseMOVDirect()
-        elif self.asm_bytes[self.pc] in MATH_REG_OPCODES:
+        elif self.asm_bytes[self.pc] in MATH_REG_OPCODES or self.asm_bytes[self.pc] in MATH_IMM_RM_OPCODES or self.asm_bytes[self.pc] in MATH_ACC_OPCODES:
             return self.parseMath()
-        elif self.asm_bytes[self.pc] in MATH_IMM_RM_OPCODES:
-            return self.parseMath()
-        elif self.asm_bytes[self.pc] in MATH_ACC_OPCODES:
-            return self.parseMath()
+        elif self.asm_bytes[self.pc] == 0x90:
+            return "nop"
+        elif self.asm_bytes[self.pc] in COND_JUMP_OPCODES:
+            
         else:
-            raise ValueError("Invalid opcode %s which is %s in hex and %s in binary at position %d" % 
+            print("Invalid opcode %s which is %s in hex and %s in binary at position %d" % 
                              (self.asm_bytes[self.pc], 
                               hex(self.asm_bytes[self.pc]), 
                               bin(self.asm_bytes[self.pc]), 
                               self.pc))
-    
+            return ""
+        
+    def parseJump(self) -> str:
+        instruction = self.getBytes(1)
+        return "%s %s" % (COND_JUMP_OPCODES[instruction], self.getIntegerFromBytes(1, signed=True))
+        
     def getBytes(self, num_bytes : int) -> int:
         ret = 0
         for i in range(num_bytes-1, -1, -1):
@@ -169,24 +194,28 @@ class ASMParser:
         rm = modrm & 0x7
         return mod, reg, rm
     
-    def parseDirectMemory(self, mod, reg, rm, word, lam, mnemonic=None, force_zero=False):
-        if mnemonic is None:
-            mnemonic = ""
-        elif not mnemonic.endswith(" "):
-            mnemonic += " "
-            
+    def parseDirectMemory(self, mod : int, reg : int, rm : int, word : bool, 
+                          lam : callable, modifier : Optional[str] = None, 
+                          src_lambda : Optional[callable] = None, 
+                          force_zero: bool = False):
+        if src_lambda is None: 
+            src_lambda = lambda: getRegisterName(reg, word) 
+        if modifier is None:
+            modifier = ""
+        elif not modifier.endswith(" "):
+            modifier += " "
         if mod == 0b11:
-            src, dest = getRegisterName(reg, word), getRegisterName(rm, word)
+            src, dest = src_lambda(), getRegisterName(rm, word)
         else: 
             displacement = self.getIntegerFromBytes(mod, signed = True)
+            if displacement == 797 or displacement == 70: 
+                raise RuntimeError()
             if mod == 0b00 and rm == 0b110:
                 # pull two bytes from the instruction
                 direct_memory_value = self.getIntegerFromBytes(2)
                 dest = [direct_memory_value]
             else:
-                print(mnemonic, getRegisterNameMemory(rm, displacement, force_zero=force_zero))
-                print(rm, displacement, force_zero)
-                dest = mnemonic + getRegisterNameMemory(rm, displacement, force_zero=force_zero)
+                dest = modifier + getRegisterNameMemory(rm, displacement, force_zero=force_zero)
             src = lam()
         return src, dest
     
@@ -202,41 +231,25 @@ class ASMParser:
         mod, reg, rm = self.getModRM()
         if instruction in MATH_REG_OPCODES:
             mnemonic, word, d = MATH_REG_OPCODES[instruction]
-            if mod == 0b11:
-                src = getRegisterName(reg, word)
-                dest = getRegisterName(rm, word)
-            else:
-                print(mod, reg, rm, instruction)
-                src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: getRegisterName(reg, word), force_zero = True)
+            src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: getRegisterName(reg, word), force_zero = True)
         elif instruction == 0x83:
-            word= MATH_IMM_RM_OPCODES[instruction]["word"]
+            modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
             mnemonic = OP83_TABLE.get(reg, f"OP{reg}")
-            if mod == 3:
-                dest=getRegisterName(rm, True)
-                src = self.getIntegerFromBytes(1)
-            else:
-                
-                displacement = self.getIntegerFromBytes(mod, signed = True)
-                if mod == 0b00 and rm == 0b110:
-                    # pull two bytes from the instruction
-                    direct_memory_value = self.getIntegerFromBytes(2)
-                    dest = [direct_memory_value]
-                else:
-                    dest = mnemonic + getRegisterNameMemory(rm, displacement, force_zero=True)
-                src = self.getIntegerFromBytes(1, signed=True)
+            src, dest = self.parseDirectMemory(mod, reg, rm, True, lambda: self.getIntegerFromBytes(1, signed=True), "modifier", lambda : self.getIntegerFromBytes(1), force_zero = True)
         elif instruction in MATH_IMM_RM_OPCODES:
             mnemonic = MATH_IMM_RM_OPCODES[instruction]["commands"][reg]
             num_bytes = MATH_IMM_RM_OPCODES[instruction]["bytes"]
-            word = MATH_IMM_RM_OPCODES[instruction]["word"]
-
-            dest = word + " " + getRegisterNameMemory(rm)
-            imm = self.getIntegerFromBytes(num_bytes, signed = True)
+            modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
+            print(modifier)
+            dest = modifier + " " + getRegisterNameMemory(rm)
+            imm = self.getIntegerFromBytes(num_bytes, signed = True)    
             src = imm
         if d: 
             src, dest = dest, src
         return "%s %s, %s" % (mnemonic, dest, src)
 
     def parseMOVValue(self) -> str:
+        mnemonic = "mov"
         instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
         w = instruction & 0x1
@@ -244,47 +257,47 @@ class ASMParser:
         # if instruction starts with 0xA0 in the first six bits, then the instruction is MOV but we just pull direct memory address
         if instruction & 0b11111100 == 0xA0:
             dest = "ax" if w else "al"
-            src = "[" + str(self.getIntegerFromBytes(num_bytes, signed = False)) + "]"
+            src = "[" + str(self.getIntegerFromBytes(num_bytes)) + "]"
             # Print bytes of src
             if d: 
                 src, dest = dest, src
-            return "mov %s, %s" % (dest, src)
+            return "%s %s, %s" % (mnemonic, dest, src)
 
     def parseMOV(self) -> str:
         # the first 6 bytes are the opcode
         # the next bit is the d bit
+        mnemonic = "mov"
         # the next bit is the w bit
         instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
-        w = instruction & 0x1
-        bytes = 2 if w else 1
-
+        word = instruction & 0x1
+        num_bytes = 2 if word else 1
+        
         mod, reg, rm = self.getModRM()
-
-        src, dest = self.parseDirectMemory(mod, reg, rm, w, lambda: getRegisterName(reg, w))
+        src, dest = self.parseDirectMemory(mod, reg, rm, word, lambda: getRegisterName(reg, word))
         
         # If the instruction is 0xc6, then the instruction is a MOV but with fixed inputs
         if instruction & 0xF6 == 0xc6:
             d = 0
-            mnemonic = "word " if w else "byte "
-            direct_memory_address = self.getIntegerFromBytes(bytes)
+            modifier = "word " if word else "byte "
+            direct_memory_address = self.getIntegerFromBytes(num_bytes)
             # unset d bit
-            src = mnemonic + str(direct_memory_address)
+            src = modifier + str(direct_memory_address)
 
         # Flip order if d is set
         if d == 0b1:
             src, dest = dest, src
-        return "mov %s, %s" % (dest, src)
+        return "%s %s, %s" % (mnemonic, dest, src)
     
-    def parseMOVDirect(self):
+    def parseMOVDirect(self) -> str:
         # the first 4 bytes are the opcode
+        mnenomic = "mov"
         instruction = self.getBytes(1)
-        w = (instruction >> 3) & 0x1
+        word = (instruction >> 3) & 0x1
         reg = instruction & 0x7
-        immediate = self.getIntegerFromBytes(w+1)
-        return "mov %s, %s" % (getRegisterName(reg, w), immediate)
+        immediate = self.getIntegerFromBytes(word + 1)
+        return "%s %s, %s" % (mnenomic, getRegisterName(reg, word), immediate)
 
-       
 def decode8086(asm_bytes) -> list[str]:
     # The first step is to parse the six bits of the opcode
     # if the first six bits of the opcode are 100010, then the opcode is MOV
