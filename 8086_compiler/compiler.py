@@ -109,9 +109,11 @@ COND_JUMP_OPCODES = {
 }
 
 class ASMParser:
-    def __init__(self, asm_bytes : List[bytes]):
+    def __init__(self, asm_bytes : List[bytes], bits : int):
         self.asm_bytes = asm_bytes
+        self.bits = bits
         self.pc = 0
+        self.labels = {}
 
     @classmethod
     def getRegisterName(cls, register : int, word: bool):
@@ -138,11 +140,30 @@ class ASMParser:
 
         return "[" + reg + "]"
     
+    def write(self, filename):
+        print(f"Lines: {len(self.lines)}")
+        print(f"Labels: {len(self.labels)}")
+        with open(filename, 'w') as f:
+            f.write(f"bits {self.bits}\n")
+            for linenum, line in self.lines.items():
+                if self.labels.get(linenum):
+                    f.write(f"{self.labels[linenum]}:\n")
+                f.write(line + "\n")
+
     def parse(self):
-        while self.pc < len(self.asm_bytes):
-            line = self.parseInstruction()
-            yield line + "\n"
-            print(line)
+        lines = {}
+        try: 
+            while self.pc < len(self.asm_bytes):
+                old_pc = self.pc
+                line = self.parseInstruction()
+                lines[old_pc] = line
+        except Exception as e:
+            print(f"Error at line {self.pc}: {e}")
+        finally: 
+            print("HERE")
+            self.lines = lines
+
+    
 
     def parseInstruction(self) -> str:
         # opcode is the first byte sort of
@@ -204,14 +225,13 @@ class ASMParser:
             src, dest = src_lambda(), self.getRegisterName(rm, word)
         else: 
             displacement = self.getIntegerFromBytes(mod, signed = True)
-            if displacement == 797 or displacement == 70: 
-                raise RuntimeError()
+            dest = modifier
             if mod == 0b00 and rm == 0b110:
                 # pull two bytes from the instruction
                 direct_memory_value = self.getIntegerFromBytes(2)
-                dest = [direct_memory_value]
+                dest += f"[{direct_memory_value}]"
             else:
-                dest = modifier + self.getRegisterNameMemory(rm, displacement, force_zero=force_zero)
+                dest += self.getRegisterNameMemory(rm, displacement, force_zero=force_zero)
             src = lam()
         return src, dest
     
@@ -249,12 +269,11 @@ class ASMParser:
         elif instruction == 0x83:
             modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
             mnemonic = OP83_TABLE.get(reg, f"OP{reg}")
-            src, dest = self.parseDirectMemory(mod, reg, rm, True, lambda: self.getIntegerFromBytes(1, signed=True), "modifier", lambda : self.getIntegerFromBytes(1), force_zero = True)
+            src, dest = self.parseDirectMemory(mod, reg, rm, True, lambda: self.getIntegerFromBytes(1, signed=True), modifier, lambda : self.getIntegerFromBytes(1), force_zero = True)
         elif instruction in MATH_IMM_RM_OPCODES:
             mnemonic = MATH_IMM_RM_OPCODES[instruction]["commands"][reg]
             num_bytes = MATH_IMM_RM_OPCODES[instruction]["bytes"]
             modifier = MATH_IMM_RM_OPCODES[instruction]["modifier"]
-            print(modifier)
             dest = modifier + " " + self.getRegisterNameMemory(rm)
             imm = self.getIntegerFromBytes(num_bytes, signed = True)    
             src = imm
@@ -262,23 +281,21 @@ class ASMParser:
 
     @parser
     def parseMOVValue(self, instruction : int) -> Tuple[str, str, str, bool]:
-        instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
         w = instruction & 0x1
         num_bytes = 2 if w else 1
         # if instruction starts with 0xA0 in the first six bits, then the instruction is MOV but we just pull direct memory address
-        if instruction & 0b11111100 == 0xA0:
-            dest = "ax" if w else "al"
-            src = "[" + str(self.getIntegerFromBytes(num_bytes)) + "]"
-            # Print bytes of src
+        
+        dest = "ax" if w else "al"
+        src = "[" + str(self.getIntegerFromBytes(num_bytes)) + "]"
+        # Print bytes of src
         return "mov", src, dest, d
     
-
+    @parser
     def parseMOV(self, instruction : int) -> str:
         # the first 6 bytes are the opcode
         # the next bit is the d bit
         # the next bit is the w bit
-        instruction = self.getBytes(1)
         d = (instruction >> 1) & 0x1
         word = instruction & 0x1
         num_bytes = 2 if word else 1
@@ -294,7 +311,7 @@ class ASMParser:
             # unset d bit
             src = modifier + str(direct_memory_address)
 
-        return "mov", dest, src, d
+        return "mov", src, dest, d
     
     def parseMOVDirect(self) -> Tuple[str, str, str, bool]:
         # the first 4 bytes are the opcode
@@ -304,14 +321,6 @@ class ASMParser:
         reg = instruction & 0x7
         immediate = self.getIntegerFromBytes(word + 1)
         return mnenomic, self.getRegisterName(reg, word), immediate, False
-
-def decode8086(asm_bytes) -> list[str]:
-    # The first step is to parse the six bits of the opcode
-    # if the first six bits of the opcode are 100010, then the opcode is MOV
-    # if the first six bits of the opcode are 100010:
-    parser = ASMParser(asm_bytes)
-    return parser.parse()
-    
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Compile 8086 assembly')
@@ -336,15 +345,14 @@ def main() -> None:
     print("Input: ", args.input)
     print("Output: ", args.output)
     print("Bits: ", args.bits)
-    inputs = readAssembly(args.input)
-    comparison=inputs
-
-    with open(args.output, 'w') as f:
-        f.write("bits %d\n" % args.bits)
-        for line in decode8086(inputs):
-            # print(line)
-            f.write(line)
-        
+    asm_bytes = readAssembly(args.input)
+    comparison=asm_bytes
+    
+    parser = ASMParser(asm_bytes, args.bits)
+    parser.parse()
+    parser.write(args.output)
+    
+    
     # Call nasm to assemble the output
     test_file = args.output.replace(".bin", ".o")
     subprocess.check_output(["nasm", "-f", "bin", "-o", test_file,  args.output])
