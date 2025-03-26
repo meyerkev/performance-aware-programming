@@ -32,6 +32,10 @@ import subprocess
 from functools import wraps
 from typing import List, Optional, Tuple
 
+from itertools import count
+
+gen = (f"label{n}" for n in count())
+
 def debugBytesStr(line):
     bitStr = ''.join(f'{byte:08b}' for byte in line)
     print(bitStr)
@@ -109,11 +113,12 @@ COND_JUMP_OPCODES = {
 }
 
 class ASMParser:
-    def __init__(self, asm_bytes : List[bytes], bits : int):
-        self.asm_bytes = asm_bytes
-        self.bits = bits
-        self.pc = 0
-        self.labels = {}
+    # This is a global counter and you may eventually want it not to be that.  
+    _label_gen = (f"label{n}" for n in count())
+
+    @classmethod
+    def next_label(cls):
+        return next(cls._label_gen)
 
     @classmethod
     def getRegisterName(cls, register : int, word: bool):
@@ -137,8 +142,13 @@ class ASMParser:
                 pass
             else:
                 reg += " + 0"
-
         return "[" + reg + "]"
+
+    def __init__(self, asm_bytes : List[bytes], bits : int):
+        self.asm_bytes = asm_bytes
+        self.bits = bits
+        self.pc = 0
+        self.labels = {}
     
     def write(self, filename):
         print(f"Lines: {len(self.lines)}")
@@ -162,8 +172,6 @@ class ASMParser:
         finally: 
             print("HERE")
             self.lines = lines
-
-    
 
     def parseInstruction(self) -> str:
         # opcode is the first byte sort of
@@ -239,8 +247,8 @@ class ASMParser:
         @wraps(fn)
         def wrapper(self, *args, **kwargs):
             instruction = self.getBytes(1)
-            print("Instruction: ", instruction, "is", hex(instruction), "in hex")
-            # call the real function — should return (mnemonic, src, dest)
+            # print("Instruction: ", instruction, "is", hex(instruction), "in hex")
+            # call the real function — should return (mnemonic, src, dest, d)
             mnemonic, src, dest, d = fn(self, instruction)
             if d:
                 src, dest = dest, src
@@ -252,7 +260,12 @@ class ASMParser:
     
     @parser
     def parseJump(self, instruction : int) -> str:
-        return COND_JUMP_OPCODES[instruction], self.getIntegerFromBytes(1, signed=True), None, None
+        jump = self.getIntegerFromBytes(1, signed=True)
+        #NASM refuses to do offsets approporiately so we need to make fake labels.  
+        label = self.labels.get(self.pc + jump)
+        if not label:
+            label = self.labels[self.pc + jump] = self.next_label()
+        return COND_JUMP_OPCODES[instruction], label, None, None
 
     @parser
     def parseMath(self, instruction : int) -> Tuple[str, str, str, bool]:
