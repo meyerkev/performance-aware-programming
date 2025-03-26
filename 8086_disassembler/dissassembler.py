@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 # Our goal is to write something that parses valid 8086 assembly code and outputs the corresponding machine code.
 # We will use the following instructions:
 # MOV, ADD, sub, MUL, DIV, AND, OR, XOR, cmp, JMP, JE, JNE, JG, JGE, JL, JLE, CALL, RET, INT, NOP
