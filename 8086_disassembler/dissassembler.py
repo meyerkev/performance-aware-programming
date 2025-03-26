@@ -34,8 +34,6 @@ from typing import List, Optional, Tuple
 
 from itertools import count
 
-gen = (f"label{n}" for n in count())
-
 def debugBytesStr(line):
     bitStr = ''.join(f'{byte:08b}' for byte in line)
     print(bitStr)
